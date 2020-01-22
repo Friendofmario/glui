@@ -1,0 +1,430 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdbool.h>
+
+#define CMDLINE_MAX 512
+#define MAX_ARGS 16
+#define TOKENLEN_MAX 32
+////////////////////////////
+struct Command
+{
+        char cmdtok[TOKENLEN_MAX];
+        char args[MAX_ARGS][TOKENLEN_MAX];
+        char dest[TOKENLEN_MAX];
+        int numArgs;
+        // Flag: 0 for no redirect, 1 for >, 2 for &>
+        int flag;
+        bool errorFlag;
+};
+struct RememDirect
+{
+        char cmd[CMDLINE_MAX];
+};
+enum ERROR_TYPE
+{
+        NOMEM,
+        UNDCMD,
+        NOFILE,
+        TOOMANYARGS,
+        TOOLONGTOK,
+        NOTDIR,
+        NOSUCH,
+        CMDTOOLONG,
+        CMDNOTFOUND,
+        MISSINGCMD,
+        NOACCESS,
+        NODIR,
+        PARSE,
+        NOOUTPUTFILE
+};
+
+void Errors(enum ERROR_TYPE error)
+{
+        switch (error)
+        {
+        case NOMEM:
+                write(2, "Error: no memory\n", 18);
+                break;
+        case TOOMANYARGS:
+                write(2, "Error: too many process arguments\n", 33);
+                break;
+        case NOFILE:
+                write(2, "Error: file not found\n", 23);
+                break;
+        case CMDNOTFOUND:
+                write(2, "Error: command not found\n", 26);
+                break;
+        case MISSINGCMD:
+                write(2, "Error: missing command\n", 24);
+                break;
+        case NOACCESS:
+                write(2, "Error: cannot open output file\n", 32);
+                break;
+        case NODIR:
+                write(2, "Error: no such directory\n", 28);
+                break;
+        case NOOUTPUTFILE:
+                write(2, "Error: no output file\n", 23);
+                break;
+        default: //Shouldn't be possible to get here.
+                write(2, "Error: cannot fetch error\n",27 );
+                break;
+        }
+}
+int Redirect(struct Command *cmd)
+{
+        // Redirect
+        int std;
+        char *pathname = strcat(getcwd(NULL, sizeof(NULL)), "/");
+        pathname = strcat(pathname, cmd->dest);
+        int fd;
+        fd = open(pathname, O_WRONLY);
+        if (fd >= 0)
+        {
+                std = dup2(fd,STDOUT_FILENO);
+        }
+        else
+        {
+                std = -1;
+                Errors(NOFILE);
+        }
+        close(fd);
+        return std;
+}
+void execute(struct Command *cmd, char *pathway)
+{
+        int std;
+        if (!strcmp(cmd->cmdtok, "pwd"))
+        {
+                if (cmd->flag == 1 || cmd->flag == 2)
+                {
+                        int std_output = dup(1);
+                        std = Redirect(cmd);
+                        if (std != -1) {
+                                printf("%s \n", pathway);
+                        }
+                        dup2(std_output,STDOUT_FILENO);
+                        close(std_output);
+                } else {
+                        printf("%s \n", pathway);
+                }
+        }
+        else if (!strcmp(cmd->cmdtok, "cd"))
+        {
+                pathway = strcat(pathway, "/");
+                pathway = strcat(pathway, cmd->args[0]);
+                chdir(pathway);
+        }
+        else {
+                pid_t pid;
+                int status;
+                pid = fork();
+                if (pid == 0)
+                {
+                        /* Child */
+
+                        if (cmd->flag == 1 || cmd->flag == 2)
+                        {
+                                std = Redirect(cmd);
+                        }
+                        char* argv[cmd->numArgs + 2]; // 2: 1 for 1st arg, 1 for NULL
+                        argv[0] = cmd->cmdtok;
+                        for(int i = 1; i < cmd->numArgs + 1; i++) {
+                                argv[i] = cmd->args[i-1];
+                        }
+                        argv[cmd->numArgs + 1] = NULL;
+                        status = execvp(cmd->cmdtok, argv);
+                        perror("Error: Command not found");
+
+                        /* End Child */
+                }
+                else if (pid > 0)
+                {
+                        /* Parent */
+                        waitpid(-1, &status, 0);
+
+                        printf("Child finishes with status: %d\n", WEXITSTATUS(status));
+                        /* End Parent */
+                }
+                else
+                {
+                        perror("fork");
+                        exit(1);
+                }
+        }
+        // return 0;
+}
+void pipeline(struct Command* cmd1, struct Command* cmd2, char* pathway){
+        //printf("More stuck\n");
+        int fd[2];
+        pipe(fd);
+        pid_t pid;
+        pid = fork();
+        if (pid == 0) {
+                // Child
+                close(fd[1]);
+                close(STDIN_FILENO);
+                dup2(fd[0], STDIN_FILENO);
+                close(fd[0]);
+                execute(cmd2, pathway);
+                //printf("Child\n");
+                exit(1);
+
+        }
+        else if (pid > 0){
+                // Parent
+                close(fd[0]);
+                dup2(fd[1],STDOUT_FILENO);
+                close(fd[1]);
+                execute(cmd1,pathway);
+                //printf("Parent\n");
+              
+        }
+}
+int countCmd(char *cmd)
+{
+        int size = 1;
+        if (cmd[0] == '|')
+        {
+                size = 0;
+        }
+        else
+        {
+                for (int i = 0; i < CMDLINE_MAX; i++)
+                {
+                        if (cmd[i] == '|')
+                                size++;
+                        if (cmd[i] == '|' && cmd[i + 1] == '|')
+                        {
+                                size = -1000;
+                        }
+                }
+        }
+        return size;
+}
+bool isBlank(char *cmd)
+{
+        //printf("cmd: %s\n",cmd);
+        //printf("Size: %lu", sizeof(cmd));
+        bool allSpace = true;
+        if (cmd != NULL)
+        {
+                for (int i = 0; i < sizeof(cmd); i++)
+                {
+                        if (cmd[i] != ' ')
+                        {
+                                //printf("cmd: <%c>\n",cmd[i]);
+                                allSpace = false;
+                        }
+                }
+        }
+        //printf("allSpace: %i\n", allSpace);
+        return allSpace;
+}
+struct Command *pars_Input(char *cmd)
+{
+        struct Command *ReturnCmd = (struct Command *)malloc(sizeof(struct Command *));
+        bool isredir = false;
+        for (int i = 0; i < CMDLINE_MAX; i++)
+        {
+                if (cmd[i] == '>')
+                {
+                        if (i == 0)
+                        {
+                                Errors(MISSINGCMD);
+                                ReturnCmd->errorFlag = true;
+                                return ReturnCmd;
+                        }
+                        isredir = true;
+                }
+        }
+        ReturnCmd->errorFlag = false;
+        char *destination;
+        char *findRedir = strtok(cmd, ">");
+        char *newCmd = findRedir; // newCmd is the command before the > operator
+        //printf("newCmd: <%s>", newCmd);
+        if (isBlank(newCmd) == true)
+        {
+                Errors(MISSINGCMD);
+                ReturnCmd->errorFlag = true;
+                return ReturnCmd;
+        }
+        findRedir = strtok(NULL, ">");
+        //printf("Redir: <%s>\n", findRedir);
+        //printf("Nocontent: %i\n",isBlank(findRedir));
+        if (findRedir != NULL && isBlank(findRedir) == false)
+        {
+                // ">&"
+                if (findRedir[0] == '&')
+                {
+                        if (findRedir[1] == ' ')
+                        {
+                                destination = strtok(findRedir, "& ");
+                        }
+                        else
+                        {
+                                destination = strtok(findRedir, "&");
+                        }
+                        ReturnCmd->flag = 2;
+
+                        //  ">"
+                }
+                else
+                {
+                        //printf("Red: <%s>\n", findRedir);
+                        if (findRedir[0] == ' ')
+                        {
+                                findRedir = strtok(findRedir, " ");
+                        }
+                        destination = findRedir;
+                        ReturnCmd->flag = true;
+                }
+        }
+        else
+        {
+                if (isredir == true)
+                {
+                        Errors(NOOUTPUTFILE);
+                        ReturnCmd->errorFlag = true;
+                        return ReturnCmd;
+                }
+                destination = findRedir;
+                ReturnCmd->flag = 0;
+        }
+
+        char *token = strtok(newCmd, " ");
+        char *cmdtoken = token; //first token is the command
+        int i = 0;
+        while (token != NULL && i < 16)
+        { //following tokens are the arguments
+                token = strtok(NULL, " ");
+                if (token != NULL)
+                {
+                        strcpy(ReturnCmd->args[i], token);
+                        ReturnCmd->numArgs++;
+                }
+                i++;
+        }
+        strcpy(ReturnCmd->cmdtok, cmdtoken);
+        if (ReturnCmd->flag == true)
+                strcpy(ReturnCmd->dest, destination);
+        return ReturnCmd;
+}
+
+void start_SShell(void)
+{
+
+        char cmd[CMDLINE_MAX];
+        char buffer[CMDLINE_MAX];
+
+        while (1)
+        {
+                char *nl;
+                int retval;
+
+                /* Print prompt */
+                printf("sshell$ ");
+                fflush(stdout);
+
+                /* Get command line */
+                fgets(cmd, CMDLINE_MAX, stdin);
+
+                /* Print command line if stdin is not provided by terminal */
+                if (!isatty(STDIN_FILENO))
+                {
+                        printf("%s", cmd);
+                        fflush(stdout);
+                }
+
+                /* Remove trailing newline from command line */
+                nl = strchr(cmd, '\n');
+                if (nl)
+                        *nl = '\0';
+
+                /* Builtin command */
+                if (!strcmp(cmd, "exit"))
+                {
+                        fprintf(stderr, "Bye...\n");
+                        break;
+                }
+
+                /* Regular command */
+                //     retval = system(cmd);
+                //     fprintf(stdout, "Return status value for '%s': %d\n",
+                //             cmd, retval);
+
+                // Count the commands in the pipeline
+                // Also returns 0 or neg. number in case of a parsing error
+                int size = countCmd(cmd);
+
+                // Parse the commands in the pipeline
+                if (size < 1)
+                {
+                        Errors(MISSINGCMD);
+                }
+                else
+                {
+                        struct Command *commands[size];
+                        char *protoCom[size];
+                        char *token = strtok(cmd, "|");
+                        protoCom[0] = token;
+                        for (int i = 0; i < size; i++)
+                        {
+                                token = strtok(NULL, "|");
+                                if (token != NULL)
+                                {
+                                        protoCom[i] = token;
+                                }
+                        }
+                        bool isError = false;
+                        for (int i = 0; i < size; i++)
+                        {
+                                //printf("index %i\n", size - 1 - i);
+                                //printf("proroiL: %s\n", protoCom[size - 1 - i]);
+                                if (isBlank(protoCom[size - 1 - i]) == true)
+                                {
+                                        Errors(MISSINGCMD);
+                                        isError = true;
+                                        break;
+                                }
+                                else
+                                {
+                                        commands[i] = pars_Input(protoCom[size - 1 - i]);
+                                }
+                        }
+                        if (isError == false)
+                        {
+                                if (size == 1) {
+                                        if (commands[0]->numArgs > MAX_ARGS){
+                                                Errors(TOOMANYARGS);
+                                        }
+                                        else {
+                                                execute(commands[0], getcwd(buffer, sizeof(buffer)));
+                                        }
+                                }
+                                else {
+                                        for (int i = 0; i < size-1; i++)
+                                        {
+                                                if (commands[i]->numArgs > MAX_ARGS)
+                                                {
+                                                        Errors(TOOMANYARGS);
+                                                }
+                                                else if (commands[i]->errorFlag == false)
+                                                {//printf("Stuck\n");
+                                                        pipeline(commands[i], commands[i+1], getcwd(buffer, sizeof(buffer)));
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+}
+int main(void)
+{
+        start_SShell();
+
+        return EXIT_SUCCESS;
+}
